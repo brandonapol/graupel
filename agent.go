@@ -39,6 +39,7 @@ type toolCall struct {
 type AgentResult struct {
 	Content string
 	Trace   []TraceItem
+	IsError bool // true when the response is an error, not a real answer
 }
 
 // Agent runs the LLM + tool loop.
@@ -69,8 +70,9 @@ func (a *Agent) Run(ctx context.Context, history []*Message) AgentResult {
 		raw, err := a.LLM.Complete(ctx, msgs)
 		if err != nil {
 			return AgentResult{
-				Content: fmt.Sprintf("⚠ LLM error: %v", err),
+				Content: fmt.Sprintf("Could not reach the model: %v", err),
 				Trace:   trace,
+				IsError: true,
 			}
 		}
 
@@ -100,6 +102,7 @@ func (a *Agent) Run(ctx context.Context, history []*Message) AgentResult {
 	return AgentResult{
 		Content: fmt.Sprintf("Reached the %d-iteration tool limit without a final answer.", maxIter),
 		Trace:   trace,
+		IsError: true,
 	}
 }
 

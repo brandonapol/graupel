@@ -1,12 +1,7 @@
 {{define "message_pair.html"}}
-<div class="msg-wrap user">
-  <div class="msg-role">You</div>
-  <div class="msg-bubble">{{.UserContent}}</div>
-</div>
-
-<div class="msg-wrap assistant">
-  <div class="msg-role">Agent</div>
-  <div class="msg-bubble">{{.AssistantMsg.Content}}</div>
+<div class="msg-wrap assistant{{if .IsError}} is-error{{end}}">
+  <div class="msg-role">{{if .IsError}}Error{{else}}Agent{{end}}</div>
+  <div class="msg-bubble{{if .IsError}} error-bubble{{end}}">{{if .IsError}}⚠ {{end}}{{.AssistantMsg.Content}}</div>
   {{if .AssistantMsg.Trace}}
   <div class="trace">
     {{range .AssistantMsg.Trace}}

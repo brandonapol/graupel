@@ -38,9 +38,8 @@
 <div class="input-area">
   <form id="send-form"
     hx-post="/chat/send"
-    hx-target="#messages"
-    hx-swap="beforeend"
-    hx-indicator="#thinking">
+    hx-target="#agent-thinking"
+    hx-swap="outerHTML">
     <input type="hidden" name="session_id" value="{{.Session.ID}}">
     <textarea
       class="input-box"
@@ -50,10 +49,6 @@
       autofocus></textarea>
     <button type="submit" class="btn-send">Send</button>
   </form>
-  <div id="thinking" class="htmx-indicator thinking">
-    <div class="dots"><span></span><span></span><span></span></div>
-    <span>Thinking…</span>
-  </div>
   <div class="send-hint">⌘↵ or Ctrl+↵ to send</div>
 </div>
 {{end}}

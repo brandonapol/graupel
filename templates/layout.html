@@ -140,21 +140,27 @@ details[open] summary.trace-summary::before{transform:rotate(90deg)}
 .btn-send:hover{opacity:.85}
 .send-hint{font-size:11px;color:var(--text3);margin-top:5px}
 
-/* ─── Loading state ───────────────────────────────────────────────────── */
-.htmx-indicator{display:none}
-.htmx-request .htmx-indicator{display:flex}
-.thinking{
-  align-items:center;gap:8px;
-  color:var(--text2);font-size:12px;padding:6px 0
+/* ─── Thinking bubble ─────────────────────────────────────────────────── */
+.thinking-bubble{
+  display:flex;align-items:center;gap:10px;
+  color:var(--text2);font-size:12px;font-style:italic
 }
-.dots{display:flex;gap:4px}
+.dots{display:flex;gap:5px}
 .dots span{
-  width:6px;height:6px;background:var(--accent);border-radius:50%;
+  width:7px;height:7px;background:var(--accent);border-radius:50%;
   animation:bounce 1.2s ease-in-out infinite
 }
 .dots span:nth-child(2){animation-delay:.2s}
 .dots span:nth-child(3){animation-delay:.4s}
-@keyframes bounce{0%,80%,100%{opacity:.3;transform:scale(.75)}40%{opacity:1;transform:scale(1)}}
+@keyframes bounce{0%,80%,100%{opacity:.25;transform:scale(.7)}40%{opacity:1;transform:scale(1)}}
+
+/* ─── Error bubble ────────────────────────────────────────────────────── */
+.error-bubble{
+  border-color:rgba(248,113,113,.45) !important;
+  background:rgba(248,113,113,.07) !important;
+  color:var(--red)
+}
+.is-error .msg-role{color:var(--red)}
 
 /* disable send button while request is in flight */
 #send-form.htmx-request .btn-send{opacity:.45;pointer-events:none}
@@ -250,7 +256,19 @@ details[open] summary.trace-summary::before{transform:rotate(90deg)}
 </div>
 
 <script>
-// Auto-resize textarea
+// ── Helpers ──────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function scrollToBottom() {
+  const m = document.getElementById('messages');
+  if (m) m.scrollTop = m.scrollHeight;
+}
+
+// ── Auto-resize textarea ─────────────────────────────────────────────────
 document.addEventListener('input', e => {
   if (e.target.classList.contains('input-box')) {
     e.target.style.height = 'auto';
@@ -258,7 +276,7 @@ document.addEventListener('input', e => {
   }
 });
 
-// Cmd/Ctrl+Enter submits
+// ── Cmd/Ctrl+Enter submits ───────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
     const form = e.target.closest('form');
@@ -266,19 +284,70 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// Scroll to bottom after new message lands
-document.addEventListener('htmx:afterSwap', e => {
+// ── Optimistic user bubble + thinking placeholder ────────────────────────
+// Fires before HTMX sends the request.
+document.addEventListener('htmx:beforeRequest', function(e) {
+  if (!e.detail.elt || e.detail.elt.id !== 'send-form') return;
+
+  const box = e.detail.elt.querySelector('.input-box');
+  const msg = box ? box.value.trim() : '';
+  if (!msg) { e.preventDefault(); return; }
+
   const msgs = document.getElementById('messages');
-  if (msgs) msgs.scrollTop = msgs.scrollHeight;
+  if (!msgs) return;
+
+  // 1. User bubble — shown immediately
+  msgs.insertAdjacentHTML('beforeend',
+    '<div class="msg-wrap user">' +
+      '<div class="msg-role">You</div>' +
+      '<div class="msg-bubble">' + esc(msg) + '</div>' +
+    '</div>'
+  );
+
+  // 2. Thinking placeholder — HTMX will replace this with the server response
+  msgs.insertAdjacentHTML('beforeend',
+    '<div id="agent-thinking" class="msg-wrap assistant">' +
+      '<div class="msg-role">Agent</div>' +
+      '<div class="msg-bubble thinking-bubble">' +
+        '<div class="dots"><span></span><span></span><span></span></div>' +
+        '<span>Thinking…</span>' +
+      '</div>' +
+    '</div>'
+  );
+
+  // Clear input right away
+  if (box) { box.value = ''; box.style.height = 'auto'; }
+
+  scrollToBottom();
 });
 
-// Clear input after send
-document.addEventListener('htmx:afterRequest', e => {
-  if (e.detail.elt && e.detail.elt.id === 'send-form') {
-    const box = e.detail.elt.querySelector('.input-box');
-    if (box) { box.value = ''; box.style.height = 'auto'; }
-  }
+// ── Scroll after assistant response lands ────────────────────────────────
+document.addEventListener('htmx:afterSwap', () => scrollToBottom());
+
+// ── Error: network failure (couldn't reach the server at all) ────────────
+document.addEventListener('htmx:sendError', function(e) {
+  if (!e.detail.elt || e.detail.elt.id !== 'send-form') return;
+  showChatError('Could not connect to the server. Is Graupel still running?');
 });
+
+// ── Error: server returned a non-2xx status ──────────────────────────────
+document.addEventListener('htmx:responseError', function(e) {
+  if (!e.detail.elt || e.detail.elt.id !== 'send-form') return;
+  const status = e.detail.xhr ? e.detail.xhr.status : '?';
+  showChatError('Server error (' + status + '). Check the terminal for details.');
+});
+
+function showChatError(msg) {
+  const el = document.getElementById('agent-thinking');
+  if (el) {
+    el.outerHTML =
+      '<div class="msg-wrap assistant is-error">' +
+        '<div class="msg-role">Error</div>' +
+        '<div class="msg-bubble error-bubble">⚠ ' + esc(msg) + '</div>' +
+      '</div>';
+  }
+  scrollToBottom();
+}
 </script>
 </body>
 </html>

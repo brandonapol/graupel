@@ -127,11 +127,12 @@ func (h *Handler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		Trace:   result.Trace,
 	})
 
-	// Return the assistant message fragment (user message was already
-	// inserted client-side via the optimistic swap below).
+	// The user bubble is already in the DOM (inserted optimistically by JS).
+	// We only return the assistant response fragment, which replaces the
+	// thinking indicator that JS injected before the request was sent.
 	render(w, "message_pair.html", map[string]any{
-		"UserContent":  content,
 		"AssistantMsg": assistantMsg,
+		"IsError":      result.IsError,
 	})
 }
 
