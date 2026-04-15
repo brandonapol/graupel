@@ -38,8 +38,8 @@
 <div class="input-area">
   <form id="send-form"
     hx-post="/chat/send"
-    hx-target="#agent-thinking"
-    hx-swap="outerHTML">
+    hx-target="#messages"
+    hx-swap="beforeend">
     <input type="hidden" name="session_id" value="{{.Session.ID}}">
     <textarea
       class="input-box"

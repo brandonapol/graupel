@@ -321,6 +321,14 @@ document.addEventListener('htmx:beforeRequest', function(e) {
   scrollToBottom();
 });
 
+// ── Before the response is inserted: remove the thinking placeholder ─────
+// htmx:beforeSwap fires after the request completes but before the HTML
+// is written into the DOM, so this cleanly splices out the spinner.
+document.addEventListener('htmx:beforeSwap', function(e) {
+  const thinking = document.getElementById('agent-thinking');
+  if (thinking) thinking.remove();
+});
+
 // ── Scroll after assistant response lands ────────────────────────────────
 document.addEventListener('htmx:afterSwap', () => scrollToBottom());
 
