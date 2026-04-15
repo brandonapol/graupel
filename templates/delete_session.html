@@ -1,0 +1,25 @@
+{{define "delete_session.html"}}
+{{/* Main target: replace chat with empty state */}}
+<div class="empty-state">
+  <h2>Graupel</h2>
+  <p>Minimal agent harness · local LLM · filesystem tools</p>
+  <button class="btn-new"
+    hx-post="/session/new"
+    hx-target="#chat"
+    hx-swap="innerHTML">Start a new chat</button>
+</div>
+
+{{/* OOB: update sidebar */}}
+<div id="session-list" hx-swap-oob="true">
+  {{if .Sessions}}
+    {{range .Sessions}}
+    <div class="session-item"
+      hx-get="/session/{{.ID}}"
+      hx-target="#chat"
+      hx-swap="innerHTML">{{.Title}}</div>
+    {{end}}
+  {{else}}
+    <div class="session-empty">No sessions yet</div>
+  {{end}}
+</div>
+{{end}}

@@ -1,0 +1,29 @@
+{{define "message_pair.html"}}
+<div class="msg-wrap user">
+  <div class="msg-role">You</div>
+  <div class="msg-bubble">{{.UserContent}}</div>
+</div>
+
+<div class="msg-wrap assistant">
+  <div class="msg-role">Agent</div>
+  <div class="msg-bubble">{{.AssistantMsg.Content}}</div>
+  {{if .AssistantMsg.Trace}}
+  <div class="trace">
+    {{range .AssistantMsg.Trace}}
+    <details class="trace-block">
+      <summary class="trace-summary">
+        <span class="trace-tool">{{.ToolName}}</span>
+        <span class="trace-input-preview">{{truncate .ToolInput 60}}</span>
+      </summary>
+      <div class="trace-body">
+        <div class="trace-label">Input</div>
+        <div class="trace-code">{{.ToolInput}}</div>
+        <div class="trace-label" style="margin-top:8px">Output</div>
+        <div class="trace-code">{{.ToolOutput}}</div>
+      </div>
+    </details>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{end}}

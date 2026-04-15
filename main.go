@@ -1,0 +1,199 @@
+package main
+
+import (
+	"embed"
+	"flag"
+	"fmt"
+	"html/template"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+)
+
+//go:embed templates
+var templatesFS embed.FS
+
+var tmpl *template.Template
+
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
+
+type Handler struct {
+	store *Store
+	agent *Agent
+}
+
+// Index serves the full-page shell.
+func (h *Handler) Index(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	sessions := h.store.ListSessions()
+	render(w, "layout.html", map[string]any{
+		"Sessions": sessions,
+	})
+}
+
+// NewSession creates a session and returns the chat window + OOB sidebar update.
+func (h *Handler) NewSession(w http.ResponseWriter, r *http.Request) {
+	sess := h.store.CreateSession()
+	sessions := h.store.ListSessions()
+	render(w, "new_session.html", map[string]any{
+		"Session":  sess,
+		"Sessions": sessions,
+		"Messages": []*Message{},
+	})
+}
+
+// GetSession returns the chat window fragment for an existing session.
+func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sess := h.store.GetSession(id)
+	if sess == nil {
+		http.NotFound(w, r)
+		return
+	}
+	msgs := h.store.GetMessages(id)
+	render(w, "chat_window.html", map[string]any{
+		"Session":  sess,
+		"Messages": msgs,
+	})
+}
+
+// SendMessage runs the agent and appends the exchange to the chat.
+func (h *Handler) SendMessage(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sessionID := r.FormValue("session_id")
+	content := strings.TrimSpace(r.FormValue("message"))
+
+	if sessionID == "" || content == "" {
+		http.Error(w, "session_id and message required", http.StatusBadRequest)
+		return
+	}
+	sess := h.store.GetSession(sessionID)
+	if sess == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Persist user message.
+	h.store.AddMessage(sessionID, Message{
+		Role:    "user",
+		Content: content,
+		Time:    time.Now(),
+	})
+
+	// Derive title from first user message.
+	if sess.Title == "New Chat" {
+		title := content
+		if len(title) > 48 {
+			title = title[:48] + "…"
+		}
+		h.store.UpdateTitle(sessionID, title)
+	}
+
+	// Run agent.
+	history := h.store.GetMessages(sessionID)
+	result := h.agent.Run(r.Context(), history)
+
+	// Persist assistant response.
+	assistantMsg := h.store.AddMessage(sessionID, Message{
+		Role:    "assistant",
+		Content: result.Content,
+		Time:    time.Now(),
+		Trace:   result.Trace,
+	})
+
+	// Return the assistant message fragment (user message was already
+	// inserted client-side via the optimistic swap below).
+	render(w, "message_pair.html", map[string]any{
+		"UserContent":  content,
+		"AssistantMsg": assistantMsg,
+	})
+}
+
+// DeleteSession removes a session.
+func (h *Handler) DeleteSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	h.store.DeleteSession(id)
+	sessions := h.store.ListSessions()
+	// Return updated sidebar + empty chat.
+	render(w, "delete_session.html", map[string]any{
+		"Sessions": sessions,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Template rendering
+// ---------------------------------------------------------------------------
+
+func render(w http.ResponseWriter, name string, data any) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
+		log.Printf("template %s: %v", name, err)
+		http.Error(w, "render error", http.StatusInternalServerError)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+func main() {
+	model := flag.String("model", "gemma3:27b", "Ollama model name (e.g. gemma3:27b, gemma4:31b)")
+	ollamaURL := flag.String("ollama", "http://localhost:11434", "Ollama server base URL")
+	addr := flag.String("addr", ":3000", "Listen address")
+	maxIter := flag.Int("max-iter", 5, "Maximum tool iterations per request")
+	shell := flag.Bool("shell", false, "Enable shell_exec tool (use with caution)")
+	flag.Parse()
+
+	var err error
+	tmpl, err = template.New("").
+		Funcs(template.FuncMap{
+			"timefmt": func(t time.Time) string { return t.Format("15:04:05") },
+			"truncate": func(s string, n int) string {
+				if len(s) <= n {
+					return s
+				}
+				return s[:n] + "…"
+			},
+		}).
+		ParseFS(templatesFS, "templates/*.html")
+	if err != nil {
+		log.Fatalf("parse templates: %v", err)
+	}
+
+	store := NewStore()
+	tools := NewToolRegistry(*shell)
+
+	var llm LLM
+	if *model == "mock" {
+		llm = &MockLLM{}
+		log.Println("Using mock LLM (no Ollama required)")
+	} else {
+		llm = &OllamaLLM{BaseURL: *ollamaURL, Model: *model}
+	}
+
+	agent := &Agent{LLM: llm, Tools: tools, MaxIter: *maxIter}
+	h := &Handler{store: store, agent: agent}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", h.Index)
+	mux.HandleFunc("POST /session/new", h.NewSession)
+	mux.HandleFunc("GET /session/{id}", h.GetSession)
+	mux.HandleFunc("POST /chat/send", h.SendMessage)
+	mux.HandleFunc("DELETE /session/{id}", h.DeleteSession)
+
+	fmt.Printf("\n  Graupel agent harness\n")
+	fmt.Printf("  Model   : %s @ %s\n", *model, *ollamaURL)
+	fmt.Printf("  Shell   : %v\n", *shell)
+	fmt.Printf("  URL     : http://localhost%s\n\n", *addr)
+
+	log.Fatal(http.ListenAndServe(*addr, mux))
+}

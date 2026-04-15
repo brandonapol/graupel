@@ -1,0 +1,17 @@
+{{define "new_session.html"}}
+{{template "chat_window.html" .}}
+
+{{/* Out-of-band swap updates the sidebar session list */}}
+<div id="session-list" hx-swap-oob="true">
+  {{if .Sessions}}
+    {{range .Sessions}}
+    <div class="session-item"
+      hx-get="/session/{{.ID}}"
+      hx-target="#chat"
+      hx-swap="innerHTML">{{.Title}}</div>
+    {{end}}
+  {{else}}
+    <div class="session-empty">No sessions yet</div>
+  {{end}}
+</div>
+{{end}}

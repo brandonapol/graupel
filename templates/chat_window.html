@@ -1,0 +1,59 @@
+{{define "chat_window.html"}}
+<div class="chat-header">{{.Session.Title}}</div>
+
+<div id="messages">
+  {{range .Messages}}
+    {{if eq .Role "user"}}
+    <div class="msg-wrap user">
+      <div class="msg-role">You</div>
+      <div class="msg-bubble">{{.Content}}</div>
+    </div>
+    {{else if eq .Role "assistant"}}
+    <div class="msg-wrap assistant">
+      <div class="msg-role">Agent</div>
+      <div class="msg-bubble">{{.Content}}</div>
+      {{if .Trace}}
+      <div class="trace">
+        {{range .Trace}}
+        <details class="trace-block">
+          <summary class="trace-summary">
+            <span class="trace-tool">{{.ToolName}}</span>
+            <span class="trace-input-preview">{{truncate .ToolInput 60}}</span>
+          </summary>
+          <div class="trace-body">
+            <div class="trace-label">Input</div>
+            <div class="trace-code">{{.ToolInput}}</div>
+            <div class="trace-label" style="margin-top:8px">Output</div>
+            <div class="trace-code">{{.ToolOutput}}</div>
+          </div>
+        </details>
+        {{end}}
+      </div>
+      {{end}}
+    </div>
+    {{end}}
+  {{end}}
+</div>
+
+<div class="input-area">
+  <form id="send-form"
+    hx-post="/chat/send"
+    hx-target="#messages"
+    hx-swap="beforeend"
+    hx-indicator="#thinking">
+    <input type="hidden" name="session_id" value="{{.Session.ID}}">
+    <textarea
+      class="input-box"
+      name="message"
+      placeholder="Message… (⌘↵ to send)"
+      rows="1"
+      autofocus></textarea>
+    <button type="submit" class="btn-send">Send</button>
+  </form>
+  <div id="thinking" class="htmx-indicator thinking">
+    <div class="dots"><span></span><span></span><span></span></div>
+    <span>Thinking…</span>
+  </div>
+  <div class="send-hint">⌘↵ or Ctrl+↵ to send</div>
+</div>
+{{end}}
