@@ -1,0 +1,36 @@
+{{define "model_selector.html"}}
+<div id="model-selector">
+  <div class="model-section-label">Model</div>
+
+  {{if .Models}}
+    {{range .Models}}
+    <form class="model-option-form"
+      hx-post="/model/set"
+      hx-target="#model-selector"
+      hx-swap="outerHTML">
+      <input type="hidden" name="model" value="{{.}}">
+      <button type="submit"
+        class="model-option{{if eq . $.Current}} active{{end}}">
+        <span class="model-dot{{if eq . $.Current}} on{{end}}"></span>
+        <span class="model-name">{{.}}</span>
+        {{if eq . $.Current}}<span class="model-check">✓</span>{{end}}
+      </button>
+    </form>
+    {{end}}
+  {{else}}
+    <div class="model-none">
+      <div class="model-none-title">No compatible models found</div>
+      <div class="model-none-body">Pull one with Ollama:</div>
+      <div class="model-pull-cmds">
+        <code>ollama pull gemma4:26b</code>
+        <code>ollama pull gemma4:12b</code>
+        <code>ollama pull gemma3:27b</code>
+        <code>ollama pull chatgpt-oss</code>
+      </div>
+      <div class="model-none-body" style="margin-top:6px">
+        Then reload this page.
+      </div>
+    </div>
+  {{end}}
+</div>
+{{end}}

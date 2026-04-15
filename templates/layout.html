@@ -159,6 +159,48 @@ details[open] summary.trace-summary::before{transform:rotate(90deg)}
 /* disable send button while request is in flight */
 #send-form.htmx-request .btn-send{opacity:.45;pointer-events:none}
 
+/* ─── Model selector ──────────────────────────────────────────────────── */
+#model-selector{
+  padding:8px 8px 4px;border-bottom:1px solid var(--border)
+}
+.model-section-label{
+  font-size:10px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.9px;color:var(--text3);padding:0 4px 5px
+}
+.model-option-form{margin-bottom:2px}
+.model-option{
+  width:100%;background:none;border:none;border-radius:6px;
+  padding:6px 8px;cursor:pointer;display:flex;align-items:center;
+  gap:7px;font-size:12px;color:var(--text2);transition:background .1s,color .1s;
+  text-align:left
+}
+.model-option:hover{background:var(--bg3);color:var(--text)}
+.model-option.active{background:var(--bg3);color:var(--text)}
+.model-dot{
+  width:7px;height:7px;border-radius:50%;
+  background:var(--text3);flex-shrink:0;transition:background .2s
+}
+.model-dot.on{background:var(--green)}
+.model-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-check{color:var(--green);font-size:11px;flex-shrink:0}
+.model-none{padding:4px 4px 6px;font-size:11px}
+.model-none-title{color:var(--yellow);font-weight:600;margin-bottom:4px}
+.model-none-body{color:var(--text2);line-height:1.5}
+.model-pull-cmds{
+  margin-top:5px;display:flex;flex-direction:column;gap:3px
+}
+.model-pull-cmds code{
+  display:block;font-family:'SF Mono','Cascadia Code','Fira Code',monospace;
+  font-size:10px;background:var(--bg);border:1px solid var(--border);
+  border-radius:4px;padding:3px 6px;color:#b0b0d0;
+  user-select:all;cursor:text
+}
+/* loading shimmer while /models fetches */
+#model-loading{
+  padding:10px 12px;font-size:11px;color:var(--text3);
+  font-style:italic
+}
+
 /* ─── Scrollbar ───────────────────────────────────────────────────────── */
 ::-webkit-scrollbar{width:5px}
 ::-webkit-scrollbar-track{background:transparent}
@@ -175,6 +217,13 @@ details[open] summary.trace-summary::before{transform:rotate(90deg)}
       hx-target="#chat"
       hx-swap="innerHTML">+ New</button>
   </div>
+  <div id="model-selector"
+    hx-get="/models"
+    hx-trigger="load"
+    hx-swap="outerHTML">
+    <div id="model-loading">Loading models…</div>
+  </div>
+
   <div id="session-list">
     {{if .Sessions}}
       {{range .Sessions}}

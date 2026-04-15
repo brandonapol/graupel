@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -87,6 +88,64 @@ func (o *OllamaLLM) Complete(ctx context.Context, messages []Message) (string, e
 		return "", fmt.Errorf("ollama error: %s", cr.Error)
 	}
 	return cr.Message.Content, nil
+}
+
+// ---------------------------------------------------------------------------
+// Model discovery
+// ---------------------------------------------------------------------------
+
+// allowedPrefixes are the only model families users may select.
+var allowedPrefixes = []string{"gemma3", "gemma4", "chatgpt-oss"}
+
+// ollamaTagsResp is the shape of GET /api/tags.
+type ollamaTagsResp struct {
+	Models []struct {
+		Name string `json:"name"`
+	} `json:"models"`
+}
+
+// ListModels queries Ollama for locally-pulled models and returns only those
+// whose names begin with an allowed prefix. Returns an empty slice (not an
+// error) when Ollama is unreachable so callers can show the install prompt.
+func ListModels(ctx context.Context, baseURL string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/tags", nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		// Ollama not running — not an error we surface as an error.
+		return nil, nil //nolint:nilerr
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var tags ollamaTagsResp
+	if err := json.Unmarshal(raw, &tags); err != nil {
+		return nil, err
+	}
+
+	var out []string
+	for _, m := range tags.Models {
+		if isAllowed(m.Name) {
+			out = append(out, m.Name)
+		}
+	}
+	return out, nil
+}
+
+func isAllowed(name string) bool {
+	lower := strings.ToLower(name)
+	for _, p := range allowedPrefixes {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

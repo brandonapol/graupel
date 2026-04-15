@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,8 +22,12 @@ var tmpl *template.Template
 // ---------------------------------------------------------------------------
 
 type Handler struct {
-	store *Store
-	agent *Agent
+	store     *Store
+	tools     *ToolRegistry
+	ollamaURL string
+	maxIter   int
+	mu        sync.RWMutex
+	model     string // currently active model name
 }
 
 // Index serves the full-page shell.
@@ -98,9 +103,21 @@ func (h *Handler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		h.store.UpdateTitle(sessionID, title)
 	}
 
-	// Run agent.
+	// Run agent with the currently selected model.
+	h.mu.RLock()
+	model := h.model
+	h.mu.RUnlock()
+
+	var llm LLM
+	if model == "mock" {
+		llm = &MockLLM{}
+	} else {
+		llm = &OllamaLLM{BaseURL: h.ollamaURL, Model: model}
+	}
+	agent := &Agent{LLM: llm, Tools: h.tools, MaxIter: h.maxIter}
+
 	history := h.store.GetMessages(sessionID)
-	result := h.agent.Run(r.Context(), history)
+	result := agent.Run(r.Context(), history)
 
 	// Persist assistant response.
 	assistantMsg := h.store.AddMessage(sessionID, Message{
@@ -123,9 +140,67 @@ func (h *Handler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	h.store.DeleteSession(id)
 	sessions := h.store.ListSessions()
-	// Return updated sidebar + empty chat.
 	render(w, "delete_session.html", map[string]any{
 		"Sessions": sessions,
+	})
+}
+
+// GetModels returns the model selector fragment, fetching available models
+// from Ollama filtered to allowed families.
+func (h *Handler) GetModels(w http.ResponseWriter, r *http.Request) {
+	models, _ := ListModels(r.Context(), h.ollamaURL)
+
+	h.mu.RLock()
+	current := h.model
+	h.mu.RUnlock()
+
+	render(w, "model_selector.html", map[string]any{
+		"Models":  models,
+		"Current": current,
+		"Allowed": allowedPrefixes,
+	})
+}
+
+// SetModel switches the active model after validating it is in the allowed list.
+func (h *Handler) SetModel(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(r.FormValue("model"))
+
+	// Validate: must be an allowed prefix or "mock".
+	if name != "mock" && !isAllowed(name) {
+		http.Error(w, "model not allowed", http.StatusForbidden)
+		return
+	}
+
+	// Also verify the model actually exists locally (skip check for mock).
+	if name != "mock" {
+		available, _ := ListModels(r.Context(), h.ollamaURL)
+		found := false
+		for _, m := range available {
+			if m == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			http.Error(w, "model not found in Ollama", http.StatusBadRequest)
+			return
+		}
+	}
+
+	h.mu.Lock()
+	h.model = name
+	h.mu.Unlock()
+
+	// Return refreshed selector so the active highlight updates.
+	models, _ := ListModels(r.Context(), h.ollamaURL)
+	render(w, "model_selector.html", map[string]any{
+		"Models":  models,
+		"Current": name,
+		"Allowed": allowedPrefixes,
 	})
 }
 
@@ -146,7 +221,7 @@ func render(w http.ResponseWriter, name string, data any) {
 // ---------------------------------------------------------------------------
 
 func main() {
-	model := flag.String("model", "gemma3:27b", "Ollama model name (e.g. gemma3:27b, gemma4:31b)")
+	model := flag.String("model", "gemma4:26b", "Ollama model name, or 'mock' for offline testing")
 	ollamaURL := flag.String("ollama", "http://localhost:11434", "Ollama server base URL")
 	addr := flag.String("addr", ":3000", "Listen address")
 	maxIter := flag.Int("max-iter", 5, "Maximum tool iterations per request")
@@ -169,19 +244,17 @@ func main() {
 		log.Fatalf("parse templates: %v", err)
 	}
 
-	store := NewStore()
-	tools := NewToolRegistry(*shell)
-
-	var llm LLM
 	if *model == "mock" {
-		llm = &MockLLM{}
 		log.Println("Using mock LLM (no Ollama required)")
-	} else {
-		llm = &OllamaLLM{BaseURL: *ollamaURL, Model: *model}
 	}
 
-	agent := &Agent{LLM: llm, Tools: tools, MaxIter: *maxIter}
-	h := &Handler{store: store, agent: agent}
+	h := &Handler{
+		store:     NewStore(),
+		tools:     NewToolRegistry(*shell),
+		ollamaURL: *ollamaURL,
+		maxIter:   *maxIter,
+		model:     *model,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", h.Index)
@@ -189,6 +262,8 @@ func main() {
 	mux.HandleFunc("GET /session/{id}", h.GetSession)
 	mux.HandleFunc("POST /chat/send", h.SendMessage)
 	mux.HandleFunc("DELETE /session/{id}", h.DeleteSession)
+	mux.HandleFunc("GET /models", h.GetModels)
+	mux.HandleFunc("POST /model/set", h.SetModel)
 
 	fmt.Printf("\n  Graupel agent harness\n")
 	fmt.Printf("  Model   : %s @ %s\n", *model, *ollamaURL)
