@@ -140,11 +140,12 @@ details[open] summary.trace-summary::before{transform:rotate(90deg)}
 .btn-send:hover{opacity:.85}
 .send-hint{font-size:11px;color:var(--text3);margin-top:5px}
 
-/* ─── Thinking bubble ─────────────────────────────────────────────────── */
-.thinking-bubble{
-  display:flex;align-items:center;gap:10px;
-  color:var(--text2);font-size:12px;font-style:italic
+/* ─── Streaming message states ────────────────────────────────────────── */
+.stream-status{
+  display:flex;align-items:center;gap:8px;
+  color:var(--text2);font-size:12px;font-style:italic;margin-bottom:2px
 }
+.stream-tokens{white-space:pre-wrap;word-break:break-word}
 .dots{display:flex;gap:5px}
 .dots span{
   width:7px;height:7px;background:var(--accent);border-radius:50%;
@@ -284,8 +285,9 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// ── Optimistic user bubble + thinking placeholder ────────────────────────
-// Fires before HTMX sends the request.
+// ── Optimistic user bubble ───────────────────────────────────────────────
+// Fires before HTMX sends the POST. Inserts the user bubble immediately so
+// the UI feels instant. The server returns the streaming placeholder div.
 document.addEventListener('htmx:beforeRequest', function(e) {
   if (!e.detail.elt || e.detail.elt.id !== 'send-form') return;
 
@@ -294,67 +296,113 @@ document.addEventListener('htmx:beforeRequest', function(e) {
   if (!msg) { e.preventDefault(); return; }
 
   const msgs = document.getElementById('messages');
-  if (!msgs) return;
+  if (msgs) {
+    msgs.insertAdjacentHTML('beforeend',
+      '<div class="msg-wrap user">' +
+        '<div class="msg-role">You</div>' +
+        '<div class="msg-bubble">' + esc(msg) + '</div>' +
+      '</div>'
+    );
+    scrollToBottom();
+  }
 
-  // 1. User bubble — shown immediately
-  msgs.insertAdjacentHTML('beforeend',
-    '<div class="msg-wrap user">' +
-      '<div class="msg-role">You</div>' +
-      '<div class="msg-bubble">' + esc(msg) + '</div>' +
-    '</div>'
-  );
-
-  // 2. Thinking placeholder — HTMX will replace this with the server response
-  msgs.insertAdjacentHTML('beforeend',
-    '<div id="agent-thinking" class="msg-wrap assistant">' +
-      '<div class="msg-role">Agent</div>' +
-      '<div class="msg-bubble thinking-bubble">' +
-        '<div class="dots"><span></span><span></span><span></span></div>' +
-        '<span>Thinking…</span>' +
-      '</div>' +
-    '</div>'
-  );
-
-  // Clear input right away
   if (box) { box.value = ''; box.style.height = 'auto'; }
+});
 
+// ── After HTMX swaps in the streaming placeholder: connect EventSource ───
+document.addEventListener('htmx:afterSwap', function() {
+  document.querySelectorAll('[data-stream-id]:not([data-stream-connected])').forEach(el => {
+    el.dataset.streamConnected = '1';
+    connectStream(el.dataset.streamId, el);
+  });
   scrollToBottom();
 });
 
-// ── Before the response is inserted: remove the thinking placeholder ─────
-// htmx:beforeSwap fires after the request completes but before the HTML
-// is written into the DOM, so this cleanly splices out the spinner.
-document.addEventListener('htmx:beforeSwap', function(e) {
-  const thinking = document.getElementById('agent-thinking');
-  if (thinking) thinking.remove();
-});
-
-// ── Scroll after assistant response lands ────────────────────────────────
-document.addEventListener('htmx:afterSwap', () => scrollToBottom());
-
-// ── Error: network failure (couldn't reach the server at all) ────────────
+// ── Error: network failure reaching Graupel itself ───────────────────────
 document.addEventListener('htmx:sendError', function(e) {
   if (!e.detail.elt || e.detail.elt.id !== 'send-form') return;
-  showChatError('Could not connect to the server. Is Graupel still running?');
+  appendErrorBubble('Could not connect to the server. Is Graupel still running?');
 });
 
-// ── Error: server returned a non-2xx status ──────────────────────────────
+// ── Error: Graupel returned a non-2xx (bad session ID, etc.) ────────────
 document.addEventListener('htmx:responseError', function(e) {
   if (!e.detail.elt || e.detail.elt.id !== 'send-form') return;
-  const status = e.detail.xhr ? e.detail.xhr.status : '?';
-  showChatError('Server error (' + status + '). Check the terminal for details.');
+  const code = e.detail.xhr ? e.detail.xhr.status : '?';
+  appendErrorBubble('Server error (' + code + '). Check the terminal for details.');
 });
 
-function showChatError(msg) {
-  const el = document.getElementById('agent-thinking');
-  if (el) {
-    el.outerHTML =
+function appendErrorBubble(msg) {
+  const msgs = document.getElementById('messages');
+  if (msgs) {
+    msgs.insertAdjacentHTML('beforeend',
       '<div class="msg-wrap assistant is-error">' +
         '<div class="msg-role">Error</div>' +
         '<div class="msg-bubble error-bubble">⚠ ' + esc(msg) + '</div>' +
-      '</div>';
+      '</div>'
+    );
+    scrollToBottom();
   }
-  scrollToBottom();
+}
+
+// ── Connect an EventSource to a streaming message div ────────────────────
+function connectStream(id, el) {
+  const statusEl   = el.querySelector('.stream-status');
+  const statusText = el.querySelector('.status-text');
+  const tokensEl   = el.querySelector('.stream-tokens');
+  let buffer = '';
+
+  const es = new EventSource('/stream/' + id);
+
+  // Status update (Thinking…, Using tool: X…)
+  es.addEventListener('status', function(e) {
+    if (statusEl) { statusEl.style.display = ''; statusText.textContent = e.data; }
+  });
+
+  // A token chunk from the LLM — append and show
+  es.addEventListener('token', function(e) {
+    if (buffer === '' && statusEl) statusEl.style.display = 'none';
+    buffer += e.data;
+    tokensEl.textContent = buffer;
+    scrollToBottom();
+  });
+
+  // The LLM response turned out to be a tool call — wipe the streamed JSON
+  es.addEventListener('tool_clear', function() {
+    buffer = '';
+    tokensEl.textContent = '';
+    if (statusEl) statusEl.style.display = '';
+  });
+
+  // Stream finished normally
+  es.addEventListener('done', function() {
+    if (statusEl) statusEl.style.display = 'none';
+    es.close();
+    scrollToBottom();
+  });
+
+  // Stream finished with an error (model unreachable, iteration limit, etc.)
+  es.addEventListener('error_msg', function(e) {
+    buffer = '';
+    tokensEl.textContent = '⚠ ' + e.data;
+    if (statusEl) statusEl.style.display = 'none';
+    el.classList.add('is-error');
+    const role = el.querySelector('.msg-role');
+    const bubble = el.querySelector('.msg-bubble');
+    if (role)   role.textContent = 'Error';
+    if (bubble) bubble.classList.add('error-bubble');
+    es.close();
+    scrollToBottom();
+  });
+
+  // Connection-level error (browser couldn't open the SSE endpoint)
+  es.onerror = function() {
+    if (es.readyState === EventSource.CLOSED && !buffer) {
+      tokensEl.textContent = '⚠ Lost connection to server.';
+      el.classList.add('is-error');
+      const bubble = el.querySelector('.msg-bubble');
+      if (bubble) bubble.classList.add('error-bubble');
+    }
+  };
 }
 </script>
 </body>

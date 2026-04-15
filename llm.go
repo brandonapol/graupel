@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,6 +15,14 @@ import (
 // LLM is the abstraction over any language model backend.
 type LLM interface {
 	Complete(ctx context.Context, messages []Message) (string, error)
+}
+
+// StreamingLLM is an optional extension that streams token chunks.
+// CompleteStream sends chunks to tokens (which it closes on return) and also
+// returns the full accumulated response for tool-call inspection.
+type StreamingLLM interface {
+	LLM
+	CompleteStream(ctx context.Context, messages []Message, tokens chan<- string) (string, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +99,65 @@ func (o *OllamaLLM) Complete(ctx context.Context, messages []Message) (string, e
 	return cr.Message.Content, nil
 }
 
+// CompleteStream streams response tokens into tokens (closed on return) and
+// returns the full accumulated text. Uses Ollama's NDJSON streaming mode.
+func (o *OllamaLLM) CompleteStream(ctx context.Context, messages []Message, tokens chan<- string) (string, error) {
+	defer close(tokens)
+
+	omsgs := make([]ollamaMsg, 0, len(messages))
+	for _, m := range messages {
+		omsgs = append(omsgs, ollamaMsg{Role: m.Role, Content: m.Content})
+	}
+	body, err := json.Marshal(ollamaChatReq{Model: o.Model, Messages: omsgs, Stream: true})
+	if err != nil {
+		return "", fmt.Errorf("marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.BaseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, raw)
+	}
+
+	var full strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return full.String(), ctx.Err()
+		}
+		var chunk ollamaChatResp
+		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
+			continue // malformed line, skip
+		}
+		if chunk.Error != "" {
+			return full.String(), fmt.Errorf("ollama: %s", chunk.Error)
+		}
+		if chunk.Message.Content != "" {
+			full.WriteString(chunk.Message.Content)
+			select {
+			case tokens <- chunk.Message.Content:
+			case <-ctx.Done():
+				return full.String(), ctx.Err()
+			}
+		}
+		if chunk.Done {
+			break
+		}
+	}
+	return full.String(), scanner.Err()
+}
+
 // ---------------------------------------------------------------------------
 // Model discovery
 // ---------------------------------------------------------------------------
@@ -163,4 +231,19 @@ func (m *MockLLM) Complete(_ context.Context, messages []Message) (string, error
 		}
 	}
 	return fmt.Sprintf("(mock) You said: %q — Ollama is not running or model is set to 'mock'.", last), nil
+}
+
+// CompleteStream streams the mock response word-by-word so the UI can be
+// tested without a real Ollama instance.
+func (m *MockLLM) CompleteStream(ctx context.Context, messages []Message, tokens chan<- string) (string, error) {
+	defer close(tokens)
+	response, _ := m.Complete(ctx, messages)
+	for _, word := range strings.Fields(response) {
+		select {
+		case tokens <- word + " ":
+		case <-ctx.Done():
+			return response, ctx.Err()
+		}
+	}
+	return response, nil
 }

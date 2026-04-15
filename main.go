@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"flag"
 	"fmt"
@@ -11,6 +12,11 @@ import (
 	"sync"
 	"time"
 )
+
+// newContext is a thin wrapper so the call site reads clearly.
+func newContext() (context.Context, context.CancelFunc) {
+	return context.WithCancel(context.Background())
+}
 
 //go:embed templates
 var templatesFS embed.FS
@@ -23,6 +29,7 @@ var tmpl *template.Template
 
 type Handler struct {
 	store     *Store
+	hub       *StreamHub
 	tools     *ToolRegistry
 	ollamaURL string
 	maxIter   int
@@ -68,7 +75,9 @@ func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// SendMessage runs the agent and appends the exchange to the chat.
+// SendMessage starts a streaming agent run. It persists the user message,
+// creates an SSE channel, launches the agent goroutine, and returns a
+// streaming placeholder div that auto-connects via EventSource.
 func (h *Handler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -87,14 +96,10 @@ func (h *Handler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist user message.
-	h.store.AddMessage(sessionID, Message{
-		Role:    "user",
-		Content: content,
-		Time:    time.Now(),
-	})
+	// Persist user message immediately.
+	h.store.AddMessage(sessionID, Message{Role: "user", Content: content, Time: time.Now()})
 
-	// Derive title from first user message.
+	// Derive title from first message.
 	if sess.Title == "New Chat" {
 		title := content
 		if len(title) > 48 {
@@ -103,37 +108,106 @@ func (h *Handler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		h.store.UpdateTitle(sessionID, title)
 	}
 
-	// Run agent with the currently selected model.
+	// Snapshot model now so the goroutine uses the model that was active
+	// when the user hit Send, not whatever is selected later.
 	h.mu.RLock()
 	model := h.model
 	h.mu.RUnlock()
 
-	var llm LLM
-	if model == "mock" {
-		llm = &MockLLM{}
-	} else {
-		llm = &OllamaLLM{BaseURL: h.ollamaURL, Model: model}
-	}
-	agent := &Agent{LLM: llm, Tools: h.tools, MaxIter: h.maxIter}
+	// Create stream. The context is cancelled if the SSE client disconnects,
+	// which will abort the in-flight Ollama request.
+	streamID := newID()
+	streamCtx, cancelStream := newContext()
+	events := h.hub.Create(streamID, cancelStream)
 
 	history := h.store.GetMessages(sessionID)
-	result := agent.Run(r.Context(), history)
 
-	// Persist assistant response.
-	assistantMsg := h.store.AddMessage(sessionID, Message{
-		Role:    "assistant",
-		Content: result.Content,
-		Time:    time.Now(),
-		Trace:   result.Trace,
-	})
+	go func() {
+		var llm LLM
+		if model == "mock" {
+			llm = &MockLLM{}
+		} else {
+			llm = &OllamaLLM{BaseURL: h.ollamaURL, Model: model}
+		}
+		agent := &Agent{LLM: llm, Tools: h.tools, MaxIter: h.maxIter}
 
-	// The user bubble is already in the DOM (inserted optimistically by JS).
-	// We only return the assistant response fragment, which replaces the
-	// thinking indicator that JS injected before the request was sent.
-	render(w, "message_pair.html", map[string]any{
-		"AssistantMsg": assistantMsg,
-		"IsError":      result.IsError,
-	})
+		result := agent.RunStream(streamCtx, history, events)
+
+		// Persist the assistant message (even on error, to keep history intact).
+		h.store.AddMessage(sessionID, Message{
+			Role:    "assistant",
+			Content: result.Content,
+			Time:    time.Now(),
+			Trace:   result.Trace,
+		})
+
+		// Give the browser a moment to open the SSE connection before we
+		// send the terminal event and close the channel. This matters for
+		// fast responses (mock, small prompts) where the goroutine can
+		// finish before the EventSource GET even arrives at the server.
+		time.Sleep(80 * time.Millisecond)
+
+		if streamCtx.Err() == nil {
+			if result.IsError {
+				events <- StreamEvent{Type: "error_msg", Data: result.Content}
+			} else {
+				events <- StreamEvent{Type: "done", Data: ""}
+			}
+		}
+		h.hub.Close(streamID)
+	}()
+
+	render(w, "message_pair.html", map[string]any{"StreamID": streamID})
+}
+
+// StreamHandler serves the SSE endpoint for a single in-flight agent run.
+func (h *Handler) StreamHandler(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, hasFlusher := w.(http.Flusher)
+
+	entry, ok := h.hub.Get(id)
+	if !ok {
+		// Stream already completed before this SSE connection arrived
+		// (very fast model or mock). Send a bare done so the UI settles.
+		fmt.Fprintf(w, "event: done\ndata: \n\n")
+		if hasFlusher {
+			flusher.Flush()
+		}
+		return
+	}
+
+	// Cancel the agent context if the browser disconnects.
+	defer entry.cancel()
+
+	if !hasFlusher {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, open := <-entry.ch:
+			if !open {
+				return
+			}
+			// SSE multi-line data: replace newlines so each line gets its own data: prefix.
+			data := strings.ReplaceAll(event.Data, "\n", "\ndata: ")
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.Type, data)
+			flusher.Flush()
+			if event.Type == "done" || event.Type == "error_msg" {
+				return
+			}
+		}
+	}
 }
 
 // DeleteSession removes a session.
@@ -251,6 +325,7 @@ func main() {
 
 	h := &Handler{
 		store:     NewStore(),
+		hub:       NewStreamHub(),
 		tools:     NewToolRegistry(*shell),
 		ollamaURL: *ollamaURL,
 		maxIter:   *maxIter,
@@ -262,6 +337,7 @@ func main() {
 	mux.HandleFunc("POST /session/new", h.NewSession)
 	mux.HandleFunc("GET /session/{id}", h.GetSession)
 	mux.HandleFunc("POST /chat/send", h.SendMessage)
+	mux.HandleFunc("GET /stream/{id}", h.StreamHandler)
 	mux.HandleFunc("DELETE /session/{id}", h.DeleteSession)
 	mux.HandleFunc("GET /models", h.GetModels)
 	mux.HandleFunc("POST /model/set", h.SetModel)

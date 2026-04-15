@@ -5,8 +5,25 @@ OLLAMA ?= http://localhost:11434
 ADDR   ?= :3000
 ITER   ?= 5
 
-## run: start server with Ollama (MODEL, OLLAMA, ADDR, ITER are overridable)
+## run: start Ollama + server together; stops Ollama on exit (MODEL, OLLAMA, ADDR, ITER are overridable)
 run:
+	@OLLAMA_PID=""; \
+	if pgrep -x ollama > /dev/null 2>&1; then \
+		echo "ollama is already running, leaving it alone"; \
+	else \
+		echo "starting ollama…"; \
+		ollama serve > /dev/null 2>&1 & \
+		OLLAMA_PID=$$!; \
+		echo "ollama PID $$OLLAMA_PID"; \
+	fi; \
+	trap ' \
+		echo "stopping graupel…"; \
+		if [ -n "$$OLLAMA_PID" ]; then \
+			echo "stopping ollama (PID $$OLLAMA_PID)…"; \
+			kill $$OLLAMA_PID 2>/dev/null; \
+			wait $$OLLAMA_PID 2>/dev/null; \
+		fi \
+	' EXIT INT TERM; \
 	go run . -model=$(MODEL) -ollama=$(OLLAMA) -addr=$(ADDR) -max-iter=$(ITER)
 
 ## mock: start server with mock LLM (no Ollama required)

@@ -1,24 +1,12 @@
 {{define "message_pair.html"}}
-<div class="msg-wrap assistant{{if .IsError}} is-error{{end}}">
-  <div class="msg-role">{{if .IsError}}Error{{else}}Agent{{end}}</div>
-  <div class="msg-bubble{{if .IsError}} error-bubble{{end}}">{{if .IsError}}⚠ {{end}}{{.AssistantMsg.Content}}</div>
-  {{if .AssistantMsg.Trace}}
-  <div class="trace">
-    {{range .AssistantMsg.Trace}}
-    <details class="trace-block">
-      <summary class="trace-summary">
-        <span class="trace-tool">{{.ToolName}}</span>
-        <span class="trace-input-preview">{{truncate .ToolInput 60}}</span>
-      </summary>
-      <div class="trace-body">
-        <div class="trace-label">Input</div>
-        <div class="trace-code">{{.ToolInput}}</div>
-        <div class="trace-label" style="margin-top:8px">Output</div>
-        <div class="trace-code">{{.ToolOutput}}</div>
-      </div>
-    </details>
-    {{end}}
+<div id="stream-{{.StreamID}}" class="msg-wrap assistant" data-stream-id="{{.StreamID}}">
+  <div class="msg-role">Agent</div>
+  <div class="msg-bubble">
+    <div class="stream-status">
+      <div class="dots"><span></span><span></span><span></span></div>
+      <span class="status-text">Thinking…</span>
+    </div>
+    <div class="stream-tokens"></div>
   </div>
-  {{end}}
 </div>
 {{end}}

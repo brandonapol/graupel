@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
@@ -129,4 +130,64 @@ func (s *Store) GetMessages(sessionID string) []*Message {
 	out := make([]*Message, len(src))
 	copy(out, src)
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// StreamHub — in-flight SSE channel registry
+// ---------------------------------------------------------------------------
+
+// StreamEvent is one SSE message pushed to the browser.
+type StreamEvent struct {
+	// Type is the SSE event name:
+	//   token      — LLM token chunk to append
+	//   tool_clear — discard buffered tokens (a tool call was detected)
+	//   status     — status line update (e.g. "Thinking…", "Using tool: X…")
+	//   done       — stream finished normally
+	//   error_msg  — stream finished with an error
+	Type string
+	Data string
+}
+
+type streamEntry struct {
+	ch     chan StreamEvent
+	cancel context.CancelFunc
+}
+
+// StreamHub manages one channel per in-flight chat request.
+type StreamHub struct {
+	mu      sync.Mutex
+	entries map[string]streamEntry
+}
+
+func NewStreamHub() *StreamHub {
+	return &StreamHub{entries: make(map[string]streamEntry)}
+}
+
+// Create registers a new buffered channel for id and returns it.
+// cancel is called by the SSE handler when the client disconnects.
+func (h *StreamHub) Create(id string, cancel context.CancelFunc) chan StreamEvent {
+	ch := make(chan StreamEvent, 128)
+	h.mu.Lock()
+	h.entries[id] = streamEntry{ch: ch, cancel: cancel}
+	h.mu.Unlock()
+	return ch
+}
+
+// Get retrieves the entry for id. The returned value is a copy; call
+// entry.cancel() directly to cancel the associated context.
+func (h *StreamHub) Get(id string) (streamEntry, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, ok := h.entries[id]
+	return e, ok
+}
+
+// Close closes the channel and removes the entry. Safe to call if id is gone.
+func (h *StreamHub) Close(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if e, ok := h.entries[id]; ok {
+		close(e.ch)
+		delete(h.entries, id)
+	}
 }

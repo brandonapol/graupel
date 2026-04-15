@@ -136,6 +136,110 @@ func (a *Agent) runTool(ctx context.Context, tc *toolCall) string {
 	}
 }
 
+// RunStream runs the agent loop and publishes SSE events to events as it goes.
+// It does NOT send the final done/error_msg event — the caller sends that
+// after persisting the message to the store.
+func (a *Agent) RunStream(ctx context.Context, history []*Message, events chan<- StreamEvent) AgentResult {
+	maxIter := a.MaxIter
+	if maxIter <= 0 {
+		maxIter = 5
+	}
+
+	push := func(t, d string) {
+		select {
+		case events <- StreamEvent{Type: t, Data: d}:
+		case <-ctx.Done():
+		}
+	}
+
+	sysPrompt := fmt.Sprintf(agentSystemPrompt, a.Tools.Descriptions())
+	msgs := []Message{{Role: "system", Content: sysPrompt}}
+	for _, m := range history {
+		if m.Role != "system" {
+			msgs = append(msgs, Message{Role: m.Role, Content: m.Content})
+		}
+	}
+
+	var trace []TraceItem
+
+	for i := 0; i < maxIter; i++ {
+		push("status", "Thinking…")
+
+		var raw string
+		var llmErr error
+
+		if sllm, ok := a.LLM.(StreamingLLM); ok {
+			// True streaming: tokens arrive live.
+			tokenCh := make(chan string, 64)
+			type llmRes struct {
+				s string
+				e error
+			}
+			resCh := make(chan llmRes, 1)
+			go func() {
+				s, e := sllm.CompleteStream(ctx, msgs, tokenCh)
+				// CompleteStream closes tokenCh via defer before returning.
+				resCh <- llmRes{s, e}
+			}()
+			for tok := range tokenCh {
+				push("token", tok)
+			}
+			res := <-resCh // safe: resCh is written after tokenCh is closed
+			raw, llmErr = res.s, res.e
+		} else {
+			raw, llmErr = a.LLM.Complete(ctx, msgs)
+		}
+
+		if llmErr != nil {
+			return AgentResult{
+				Content: fmt.Sprintf("Could not reach the model: %v", llmErr),
+				Trace:   trace,
+				IsError: true,
+			}
+		}
+		if ctx.Err() != nil {
+			return AgentResult{Content: strings.TrimSpace(raw), Trace: trace}
+		}
+
+		tc := parseToolCall(raw)
+		if tc == nil {
+			// Final answer.
+			// For non-streaming LLMs replay word-by-word so the UI animates.
+			if _, ok := a.LLM.(StreamingLLM); !ok {
+				for _, w := range strings.Fields(strings.TrimSpace(raw)) {
+					push("token", w+" ")
+				}
+			}
+			return AgentResult{Content: strings.TrimSpace(raw), Trace: trace}
+		}
+
+		// Tool call detected: tell the client to discard the streamed JSON
+		// and show a tool-use status instead.
+		push("tool_clear", "")
+		push("status", "Using tool: "+tc.Tool+"…")
+
+		toolOut := a.runTool(ctx, tc)
+
+		trace = append(trace, TraceItem{
+			ToolName:   tc.Tool,
+			ToolInput:  tc.Input,
+			ToolOutput: toolOut,
+		})
+
+		msgs = append(msgs, Message{Role: "assistant", Content: raw})
+		msgs = append(msgs, Message{
+			Role:    "user",
+			Content: fmt.Sprintf("[tool result: %s]\n%s", tc.Tool, toolOut),
+		})
+	}
+
+	return AgentResult{
+		Content: fmt.Sprintf("Reached the %d-iteration tool limit without a final answer.", maxIter),
+		Trace:   trace,
+		IsError: true,
+	}
+}
+
 func parseToolCall(response string) *toolCall {
 	match := toolCallRE.FindStringSubmatch(response)
 	if len(match) < 2 {
